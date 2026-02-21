@@ -149,24 +149,9 @@ The core async runtime. This is where all the real logic lives.
 
 The entry point. Parses CLI arguments (`--project-id`, `--location`, `--model`, `--voice-name`, etc.), merges them with `LiveTranscriptSettings.from_environment()`, applies the SDK patch, and runs `LiveTranscriptionRunner` via `asyncio.run()`.
 
-### `src/gemini_live_transcript/patches.py`
-
-Monkey-patches the `google-genai` SDK using `wrapt`. The SDK's `AudioTranscriptionConfig` Pydantic model is empty (no fields), but the Vertex API accepts a `model` field on the wire. This patch strips the field during SDK validation and restores it during serialization so the config reaches the API intact.
-
 ### `src/gemini_live_transcript/__init__.py`
 
-Package exports: `LiveTranscriptSettings`, `apply_google_genai_live_patch`, `build_live_connect_config`, `create_vertex_client`.
-
-### `packages/gemini-live-interrupt/`
-
-A standalone sidecar package (`gemini-live-interrupt`) that extracts the interrupt-resume logic into a drop-in patch for the `google-genai` SDK. One function call enables it for any existing code:
-
-```python
-from gemini_live_interrupt import enable_interrupt_resume
-enable_interrupt_resume()
-```
-
-It patches `AsyncSession._receive()` to intercept interruption signals and inject resume context automatically. Since it has no access to audio playback timing, it uses all accumulated output transcription as the heard text (a reasonable approximation). See `packages/gemini-live-interrupt/README.md` for full API docs.
+Package exports: `LiveTranscriptSettings`, `build_live_connect_config`, `create_vertex_client`.
 
 ## Environment Variables
 
