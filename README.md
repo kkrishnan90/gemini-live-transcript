@@ -149,9 +149,13 @@ The core async runtime. This is where all the real logic lives.
 
 The entry point. Parses CLI arguments (`--project-id`, `--location`, `--model`, `--voice-name`, etc.), merges them with `LiveTranscriptSettings.from_environment()`, applies the SDK patch, and runs `LiveTranscriptionRunner` via `asyncio.run()`.
 
+### `src/gemini_live_transcript/patches.py`
+
+Monkey-patches the `google-genai` SDK using `wrapt`. The SDK's `AudioTranscriptionConfig` Pydantic model is empty (no fields), but the Vertex API accepts a `model` field on the wire. This patch strips the field during SDK validation and restores it during serialization so the config reaches the API intact.
+
 ### `src/gemini_live_transcript/__init__.py`
 
-Package exports: `LiveTranscriptSettings`, `build_live_connect_config`, `create_vertex_client`.
+Package exports: `LiveTranscriptSettings`, `apply_google_genai_live_patch`, `build_live_connect_config`, `create_vertex_client`.
 
 ## Environment Variables
 
