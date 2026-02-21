@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gemini-live-transcript"
+version = "0.1.0"
+description = "Drop-in Gemini Live API transcription helpers for Vertex AI with Whisper v3-large config."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "google-genai",
+  "numpy",
+  "sounddevice",
+  "wrapt",
+]
+
+[project.scripts]
+gemini-live-transcribe = "gemini_live_transcript.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

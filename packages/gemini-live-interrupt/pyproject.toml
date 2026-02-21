@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gemini-live-interrupt"
+version = "0.1.0"
+description = "Drop-in interrupt-resume for the google-genai Live API. One function call, zero code changes."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+keywords = ["gemini", "live-api", "interrupt", "resume", "vertex-ai", "google-genai"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+  "google-genai",
+  "wrapt",
+]
+
+[project.urls]
+Homepage = "https://github.com/krishnankumar/gemini-live-transcript"
+Issues = "https://github.com/krishnankumar/gemini-live-transcript/issues"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
