@@ -1,8 +1,8 @@
 # gemini-live-interrupt
 
-Drop-in interrupt-resume for the [google-genai](https://pypi.org/project/google-genai/) Live API. One function call, zero code changes.
+Automatic interrupt-resume for the Gemini Live API. When a user interrupts the model mid-sentence, this package injects context behind the scenes so the model knows what it was saying, what the user said, and can decide whether to continue, pivot, or blend both.
 
-When a user interrupts the model mid-response, the Gemini Live API fires an `interrupted` signal but leaves it up to you to handle context recovery. This package patches the SDK transparently so the model automatically receives context about what it was saying and what the user said, enabling it to seamlessly resume, pivot, or blend.
+Works with any existing `google-genai` application. No code changes required beyond a single function call.
 
 ## Install
 
@@ -10,84 +10,183 @@ When a user interrupts the model mid-response, the Gemini Live API fires an `int
 pip install gemini-live-interrupt
 ```
 
-## Quick start
+## The Problem
+
+When using the Gemini Live API for real-time audio conversations, users can interrupt the model at any time. The API sends an `interrupted` signal, but the model has no memory of what it was saying or how far it got. On its next response, it starts fresh — losing the context of the interrupted response entirely.
+
+For example, if the model is telling a 5-line story and the user interrupts at line 2, the model won't know to continue from line 2. It either starts over, or moves on as if the story never happened.
+
+## How This Package Solves It
+
+Call `enable_interrupt_resume()` once before you connect to the Gemini Live API. After that, every live session automatically:
+
+1. Tracks what the model was saying (output transcription)
+2. Tracks what the user said (input transcription)
+3. Detects when an interruption happens
+4. Injects a context-recovery prompt to the model with what was said and what to do next
+
+The model then decides the right course of action based on the context.
+
+## Step-by-step Usage
+
+### Step 1: Install the package
+
+```bash
+pip install gemini-live-interrupt
+```
+
+### Step 2: Add one line to your existing code
+
+Add `enable_interrupt_resume()` **before** you create any live sessions:
 
 ```python
 from gemini_live_interrupt import enable_interrupt_resume
 
-enable_interrupt_resume()  # one call, done
-
-# Your existing google-genai code works unchanged:
-async with client.aio.live.connect(model=model, config=config) as session:
-    await session.send(input="Hello!", end_of_turn=True)
-    async for msg in session.receive():
-        # interruptions are now auto-handled behind the scenes
-        print(msg)
+enable_interrupt_resume()
 ```
 
-Call `enable_interrupt_resume()` once before connecting. Every `AsyncSession` created after that will automatically:
+That's it. Your existing `google-genai` code does not need any other changes.
 
-1. Track input/output transcription per session
-2. Detect `content.interrupted` signals
-3. Inject a context-recovery prompt via `send_client_content` so the model knows what it was saying and what the user said
+### Step 3: Make sure transcription is enabled in your config
 
-## API
+The package reads the transcription text that the Gemini Live API provides. For this to work, your `LiveConnectConfig` must have input and output transcription enabled:
 
-### `enable_interrupt_resume(prompt_builder=None, max_history=4)`
+```python
+config = {
+    "response_modalities": ["AUDIO"],
+    "input_audio_transcription": {},
+    "output_audio_transcription": {},
+    # ... your other config
+}
+```
 
-Patches `AsyncSession._receive()` to auto-handle interruptions.
+If transcription is not enabled, the package has nothing to track and interruptions won't be handled.
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `prompt_builder` | `callable` or `None` | `None` | Custom function `(heard, user_text, history) -> str` that builds the resume prompt. If `None`, uses the built-in template. |
-| `max_history` | `int` | `4` | Number of conversation turns to keep in the rolling history window (e.g., 4 = last 2 exchanges). |
+### Step 4: Connect and use the API as normal
 
-**Parameters passed to `prompt_builder`:**
+```python
+from google import genai
+from google.genai import types
+from gemini_live_interrupt import enable_interrupt_resume
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `heard` | `str` | Accumulated output transcription text from the model's response up to the interruption point. |
-| `user_text` | `str` | Latest user input transcription text (what the user said to interrupt). |
-| `history` | `list[tuple[str, str]]` | Rolling conversation history as `(role, text)` tuples where role is `"user"` or `"model"`. |
+# Step 2: enable before connecting
+enable_interrupt_resume()
 
-**Example with custom prompt:**
+# Your existing code — nothing changes below this line
+client = genai.Client(vertexai=True, project="my-project", location="us-central1")
+
+config = {
+    "response_modalities": [types.Modality.AUDIO],
+    "input_audio_transcription": {},
+    "output_audio_transcription": {},
+    "speech_config": {
+        "voice_config": {
+            "prebuilt_voice_config": {"voice_name": "Aoede"}
+        }
+    },
+}
+
+async with client.aio.live.connect(
+    model="gemini-live-2.5-flash-native-audio", config=config
+) as session:
+    # send audio, receive responses — interruptions are handled automatically
+    async for msg in session.receive():
+        if msg.server_content and msg.server_content.model_turn:
+            for part in msg.server_content.model_turn.parts:
+                if part.inline_data:
+                    # play or forward audio as usual
+                    play_audio(part.inline_data.data)
+```
+
+## What Happens When the User Interrupts
+
+When the model is speaking and the user starts talking, the API sends `content.interrupted`. This package intercepts it and sends a context prompt to the model containing:
+
+1. **Recent conversation** — the last few turns of dialogue so the model has context
+2. **What was being said** — the output transcription accumulated before the interruption
+3. **What the user said** — the input transcription of the interrupting speech
+4. **Exact continuation text** — the sentence that was cut off, from its beginning (not mid-word)
+5. **Instructions** for how to proceed:
+   - **New question:** answer it, then ask if the user wants to continue the interrupted response
+   - **Background noise / acknowledgment:** seamlessly continue from the sentence that was cut off
+   - **Follow-up or clarification:** address it briefly, then continue the interrupted response
+
+The model receives all of this before generating its next response, so it can make an informed decision.
+
+## Example: FastAPI WebSocket App
+
+```python
+from fastapi import FastAPI, WebSocket
+from google import genai
+from google.genai import types
+from gemini_live_interrupt import enable_interrupt_resume
+
+app = FastAPI()
+enable_interrupt_resume()
+
+client = genai.Client(vertexai=True, project="my-project", location="us-central1")
+
+@app.websocket("/live")
+async def live_audio(ws: WebSocket):
+    await ws.accept()
+
+    config = {
+        "response_modalities": [types.Modality.AUDIO],
+        "input_audio_transcription": {},
+        "output_audio_transcription": {},
+    }
+
+    async with client.aio.live.connect(
+        model="gemini-live-2.5-flash-native-audio", config=config
+    ) as session:
+        async for msg in session.receive():
+            if msg.server_content and msg.server_content.model_turn:
+                for part in msg.server_content.model_turn.parts:
+                    if part.inline_data:
+                        await ws.send_bytes(part.inline_data.data)
+```
+
+Interruptions are handled transparently. When a connected client interrupts the model, the resume context is injected automatically.
+
+## Custom Prompt
+
+If you want to control exactly what prompt is injected on interruption, pass a `prompt_builder` function:
 
 ```python
 def my_prompt(heard: str, user_text: str, history: list) -> str:
-    return f"You were interrupted. You said: {heard}. User said: {user_text}. Continue."
+    """
+    Args:
+        heard: what the model was saying (output transcription up to interruption)
+        user_text: what the user said to interrupt
+        history: list of (role, text) tuples — recent conversation turns
+    Returns:
+        the prompt string to inject
+    """
+    return (
+        f"You were interrupted. You were saying: {heard}. "
+        f"The user said: {user_text}. "
+        f"Continue from where you left off."
+    )
 
 enable_interrupt_resume(prompt_builder=my_prompt)
 ```
 
-### `disable_interrupt_resume()`
+## Configuration
 
-Removes the patch and restores the original `AsyncSession._receive()`. Takes no arguments.
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `prompt_builder` | `callable` or `None` | `None` | Custom `(heard, user_text, history) -> str` function. If `None`, uses the built-in prompt. |
+| `max_history` | `int` | `4` | Number of conversation turns to keep (4 = last 2 exchanges). |
+
+## Disabling
+
+To remove the patch and restore original behavior:
 
 ```python
 from gemini_live_interrupt import disable_interrupt_resume
 
 disable_interrupt_resume()
 ```
-
-## How it works
-
-- Uses [wrapt](https://pypi.org/project/wrapt/) to wrap `AsyncSession._receive()` (the single-message async method, not the `receive()` async generator)
-- Attaches an `_InterruptHandler` instance to each session lazily on first `_receive()` call (no `__init__` or `connect()` patching needed)
-- Compatible with the existing `gemini-live-transcript` SDK patches (different methods are patched)
-- Thread-safe patch application via lock
-- Idempotent: calling `enable_interrupt_resume()` multiple times is safe
-
-## Default prompt behavior
-
-When an interruption is detected, the injected prompt includes:
-
-1. **Recent conversation history** (last N turns)
-2. **What the model was saying** (output transcription up to interruption)
-3. **What the user said** (input transcription)
-4. **Smart routing instructions** telling the model to:
-   - Address new questions directly
-   - Continue seamlessly if the interruption was just background noise
-   - Blend both if the interruption was a follow-up
 
 ## Requirements
 
