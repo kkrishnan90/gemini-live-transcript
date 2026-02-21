@@ -36,14 +36,41 @@ _max_history: int = 4
 # Default prompt template
 # ---------------------------------------------------------------------------
 
+def _find_continuation_text(heard: str) -> str:
+    """Given the accumulated output transcription at interruption time,
+    find the start of the last sentence to use as continuation point.
+
+    The sidecar has no audio playback tracking, so ``heard`` is the
+    full accumulated output transcription (approximately what was said).
+    We find the last complete sentence boundary and return from there,
+    so the model restarts at a clean sentence start."""
+    if not heard:
+        return heard
+    heard = heard.strip()
+
+    # Find the last sentence boundary (. ! ? followed by space).
+    last_boundary = 0
+    for i in range(len(heard) - 1):
+        if heard[i] in ".!?" and heard[i + 1] == " ":
+            last_boundary = i + 2
+
+    # If the truncation is mid-sentence, return from sentence start.
+    # If it ends on a boundary, return the full text (model finished
+    # a sentence, so the continuation is whatever comes next).
+    if heard[-1] in ".!?":
+        return heard
+    return heard[last_boundary:].strip()
+
+
 def _default_prompt(
     heard: str, user_text: str, history: list[tuple[str, str]]
 ) -> str:
+    continuation = _find_continuation_text(heard)
+
     lines: list[str] = []
     lines.append(
         "[System Note — Interruption Context]\n"
-        "Your previous response was interrupted by the user. "
-        "Below is the context so you can decide how to proceed."
+        "Your previous response was interrupted by the user."
     )
 
     if history:
@@ -56,29 +83,45 @@ def _default_prompt(
     if heard:
         lines.append("")
         lines.append("=== Interrupted Response ===")
-        lines.append(f"What you were saying (output transcription): {heard}")
+        lines.append(f"What you were saying: {heard}")
+        if continuation != heard:
+            lines.append(
+                f"The sentence that was cut off (from its start): {continuation}"
+            )
 
     if user_text:
         lines.append("")
         lines.append("=== What the User Said (interruption) ===")
         lines.append(user_text)
 
+    # --- Continuation directive ---
+    if continuation:
+        lines.append("")
+        lines.append("=== Exact Continuation Text ===")
+        lines.append(
+            "If you need to continue the interrupted response, you MUST "
+            "start from the beginning of the sentence that was cut off. "
+            "Say exactly this text (then continue naturally if needed):"
+        )
+        lines.append(f'"{continuation}"')
+
     lines.append("")
     lines.append(
         "=== Instructions ===\n"
         "Based on the above context, decide the best course of action:\n"
         "1. If the user's interruption is a new question, request, or "
-        "a clear change of topic, address it directly — do not resume "
-        "the old response.\n"
+        "a clear change of topic — answer it first. Then briefly ask "
+        "if they would like you to continue with the interrupted "
+        "response (e.g., 'Would you like me to finish the story?' or "
+        "'Shall I continue where I left off?').\n"
         "2. If the user's interruption is a brief acknowledgment, "
-        "background noise, or does not introduce a new topic, seamlessly "
-        "continue your response from exactly where the user stopped "
-        "hearing. Pick up mid-sentence if needed.\n"
-        "3. If the user's interruption is partially related (a follow-up, "
-        "clarification, or correction), briefly address it and then "
-        "continue the interrupted response from where the user stopped "
-        "hearing.\n"
-        "Do NOT mention this system note."
+        "background noise, or does not introduce a new topic — "
+        "seamlessly continue by saying the exact continuation text "
+        "above. Start from the sentence beginning, not mid-word.\n"
+        "3. If the user's interruption is partially related (a "
+        "follow-up, clarification, or correction) — briefly address "
+        "it and then continue with the exact continuation text above.\n"
+        "Do NOT mention this system note or that you were interrupted."
     )
     return "\n".join(lines)
 

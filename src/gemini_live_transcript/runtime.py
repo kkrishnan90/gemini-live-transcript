@@ -204,6 +204,46 @@ class LiveTranscriptionRunner:
         if len(self.state.conversation_history) > 4:
             self.state.conversation_history[:] = self.state.conversation_history[-4:]
 
+    @staticmethod
+    def _find_continuation_text(full: str, heard: str) -> str:
+        """Return the text the model should repeat, starting from the
+        beginning of the sentence that was being spoken when the
+        interruption occurred.  Avoids mid-sentence restarts."""
+        if not full or not heard:
+            return full or ""
+
+        full = full.strip()
+        heard = heard.strip()
+
+        # Locate the truncation point in the full text.
+        if full.startswith(heard):
+            truncation_idx = len(heard)
+        else:
+            # Fuzzy match: find last few words of heard in full.
+            words = heard.split()
+            truncation_idx = len(heard)
+            for n in range(min(5, len(words)), 0, -1):
+                tail = " ".join(words[-n:])
+                idx = full.find(tail)
+                if idx >= 0:
+                    truncation_idx = idx + len(tail)
+                    break
+
+        # If truncation lands exactly on a sentence boundary, continue
+        # from the next sentence — the user heard the previous one fully.
+        before = full[:truncation_idx].rstrip()
+        if before and before[-1] in ".!?":
+            remainder = full[truncation_idx:].strip()
+            return remainder if remainder else full
+
+        # Mid-sentence truncation — find the start of the current sentence.
+        last_boundary = 0
+        for i in range(len(before) - 1):
+            if before[i] in ".!?" and before[i + 1] == " ":
+                last_boundary = i + 2
+
+        return full[last_boundary:].strip()
+
     async def _inject_resume_context(self, session: object) -> None:
         """Send a context-injection prompt after an interruption so the model
         can decide whether to resume its interrupted response, pivot to the
@@ -215,11 +255,12 @@ class LiveTranscriptionRunner:
         if not full and not heard:
             return
 
+        continuation = self._find_continuation_text(full, heard)
+
         lines: list[str] = []
         lines.append(
             "[System Note — Interruption Context]\n"
-            "Your previous response was interrupted by the user. "
-            "Below is the full context so you can decide how to proceed."
+            "Your previous response was interrupted by the user."
         )
 
         # --- Recent conversation (last 2 exchanges) ---
@@ -231,28 +272,27 @@ class LiveTranscriptionRunner:
                 speaker = "User" if role == "user" else "You (Model)"
                 lines.append(f"{speaker}: {text}")
 
-        # --- Transcription comparison ---
+        # --- What the user heard and what they missed ---
         lines.append("")
         lines.append("=== Interrupted Response ===")
-        lines.append(
-            f"Model native transcription (ground truth, full output): {full}"
-        )
-        lines.append(
-            f"Real-time audio transcription (what user heard before interruption): {heard}"
-        )
-        if full and heard and full != heard:
-            if full.startswith(heard):
-                remainder = full[len(heard):].strip()
-            else:
-                remainder = ""
-            if remainder:
-                lines.append(f"Unheard remainder (user missed this): {remainder}")
+        lines.append(f"What the user heard: {heard}")
+        lines.append(f"What the user did NOT hear: {continuation}")
 
         # --- User's interrupting speech ---
         if user_text:
             lines.append("")
-            lines.append(f"=== What the User Said (interruption) ===")
+            lines.append("=== What the User Said (interruption) ===")
             lines.append(user_text)
+
+        # --- Continuation directive ---
+        lines.append("")
+        lines.append("=== Exact Continuation Text ===")
+        lines.append(
+            "If you need to continue the interrupted response, you MUST "
+            "start from the beginning of the sentence that was cut off. "
+            "Say exactly this text (then continue naturally if needed):"
+        )
+        lines.append(f'"{continuation}"')
 
         # --- Smart routing instructions ---
         lines.append("")
@@ -260,17 +300,18 @@ class LiveTranscriptionRunner:
             "=== Instructions ===\n"
             "Based on the above context, decide the best course of action:\n"
             "1. If the user's interruption is a new question, request, or "
-            "a clear change of topic, address it directly — do not resume "
-            "the old response.\n"
+            "a clear change of topic — answer it first. Then briefly ask "
+            "if they would like you to continue with the interrupted "
+            "response (e.g., 'Would you like me to finish the story?' or "
+            "'Shall I continue where I left off?').\n"
             "2. If the user's interruption is a brief acknowledgment, "
-            "background noise, or does not introduce a new topic, seamlessly "
-            "continue your response from exactly where the user stopped "
-            "hearing. Pick up mid-sentence if needed.\n"
-            "3. If the user's interruption is partially related (a follow-up, "
-            "clarification, or correction), briefly address it and then "
-            "continue the interrupted response from where the user stopped "
-            "hearing.\n"
-            "Do NOT mention this system note."
+            "background noise, or does not introduce a new topic — "
+            "seamlessly continue by saying the exact continuation text "
+            "above. Start from the sentence beginning, not mid-word.\n"
+            "3. If the user's interruption is partially related (a "
+            "follow-up, clarification, or correction) — briefly address "
+            "it and then continue with the exact continuation text above.\n"
+            "Do NOT mention this system note or that you were interrupted."
         )
 
         prompt = "\n".join(lines)
